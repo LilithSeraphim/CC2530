@@ -1,0 +1,566 @@
+/**
+工程名称：2018主车综合程序
+修改时间：2018.08.23
+*/
+#include <stdio.h>
+#include "stm32f4xx.h"
+#include "delay.h"
+#include "infrared.h"
+#include "cba.h"
+#include "ultrasonic.h"
+#include "canp_hostcom.h"
+#include "hard_can.h"
+#include "bh1750.h"
+#include "syn7318.h"
+#include "power_check.h"
+#include "can_user.h"
+#include "data_base.h"
+#include "roadway_check.h"
+#include "tba.h"
+#include "data_base.h"
+#include "swopt_drv.h"
+#include "uart_a72.h"
+#include "Can_check.h"
+#include "delay.h"
+#include "can_user.h"
+#include "Timer.h"
+#include "Rc522.h"
+#include "tbaseg.h"
+#include "drive.h"
+#include "agv.h"
+
+/***************************** 自定义变量 *****************************/
+static uint8_t Go_Speed  = 50;              // 全局前进速度值
+static uint8_t wheel_Speed  = 90;           // 全局转弯速度值
+static uint16_t Go_Temp = 440;              // 全局转弯速度值
+static uint8_t make = 0;                    // 全自动驾驶标志位
+static uint32_t Power_check_times;          // 电量检测周期
+static uint32_t LED_twinkle_times;          // LED闪烁周期
+static uint32_t WIFI_Upload_data_times;     // 通过Wifi上传数据周期
+static uint32_t RFID_Init_Check_times;      // RFID初始化检测时间周期
+
+static uint8_t RFID_Flag = 0;          		// RFID检测标志位
+static uint8_t SYN7318_Flag = 0;            // SYN7318语音识别命令ID编号
+static uint8_t number = 0;                  // 计数值
+static uint8_t RFID_addr = 0;				// RFID有效数据块地址
+static uint16_t dis_size = 0;               // 超声波测距值缓存
+	
+static uint8_t SYN_Sesult[8] = {0xAF, 0x06, 0x00, 0x02, 0x00, 0x00, 0x01, 0xBF};
+
+uint8_t AGV_GO_sp = 50;				// 小车前进速度
+uint8_t AGV_wheel_sp = 90;			// 小车转弯速度
+uint16_t AGV_GO_mp = 420;			// 小车前进码盘
+
+static void Car_Thread(void);               // 全自动函数
+static void KEY_Check(void);                // 按键检测函数
+static void Hardware_Init(void);            // 硬件初始化函数
+/**********************************************************************/
+
+/* 全自动运行函数 */
+void Car_Thread(void)
+{
+    switch(make)
+    {
+        case 0x01:
+        {
+			
+            Send_ZigbeeData_To_Fifo(SMG_JSK, 8);    // LED显示标志物计时模式 -> 开启
+            delay_ms(300);
+            Send_ZigbeeData_To_Fifo(SMG_JSK, 8);    // LED显示标志物计时模式 -> 开启
+            delay_ms(300);
+
+            Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Right(wheel_Speed);         // 主车右转
+			
+//---------------------- 静态二维码标志物 ----------------------
+			Car_Time_Track(Go_Speed, 1000);	// 主车时间循迹
+			delay_ms(500);
+			delay_ms(500);
+			delay_ms(500);
+			delay_ms(500);
+			
+			Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			
+//---------------------- 智能交通灯标志物 ----------------------
+            delay_ms(100);
+            Send_ZigbeeData_To_Fifo(Tht_Open, 8);   // 智能交通灯进入识别模式
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            Send_ZigbeeData_To_Fifo(Tht_Red, 8);    // 智能交通灯 -> 红色
+            delay_ms(100);
+			
+            Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Left(wheel_Speed);          // 主车左转
+			Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Right(wheel_Speed);         // 主车右转
+			Car_Back(Go_Speed, 1000);		// 主车后退
+			Car_Track(Go_Speed);            // 主车循迹
+			
+//------------------- 静态标志物 --------------------------
+            delay_ms(500);
+            Ultrasonic_Ranging();           // 采集超声波测距距离
+            dis_size = dis;
+            LED_Dis_Zigbee(dis_size);       // LED显示标志物发送测距信息
+            delay_ms(100);
+			LED_Dis_Zigbee(dis_size);       // LED显示标志物发送测距信息
+            delay_ms(100);	
+			
+			Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Left(wheel_Speed);          // 主车左转
+			Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Right(wheel_Speed);         // 主车右转
+			
+//------------------- 智能路灯 ---------------------------
+            delay_ms(500);
+            Light_Inf(2);                   // 自动调节光照强度函数
+			
+			Car_Right(wheel_Speed);         // 主车右转
+			Car_Right(wheel_Speed);         // 主车右转
+			
+			RFID_addr = 12;					// RFID有效数据块地址
+			RFID_Flag = 10;					// RFID检测标志位/行进速度降低参数
+			CarThread_Track(Go_Speed - RFID_Flag); // 主车循迹
+			
+			make = 0x02;
+			break;
+			
+		case 0x02:
+			if (Stop_Flag == 0x01)
+			{
+				CarThread_Go(Go_Speed - RFID_Flag, Go_Temp);      // 主车前进
+				make = 0x03;
+			}
+			if (RFID_Flag && (PcdRequest(PICC_REQALL,CT) == MI_OK))		// RFID寻卡
+			{
+				Roadway_Flag_clean();	// 清除标志位状态
+				Send_UpMotor(0,0);		// 停车
+				delay_ms(100);
+				if (Read_RFID(RFID_addr) == 0x02)		// RFID 读卡 -> READ_RFID[16]
+				{
+					RFID_Flag = 0;
+					CarThread_Track(Go_Speed); // 主车循迹
+				}
+				else
+				{
+					CarThread_Track(Go_Speed - RFID_Flag); // 主车循迹
+				}
+			}
+			break;
+			
+		case 0x03:
+			if (Stop_Flag == 0x03)
+			{
+				Car_Right(wheel_Speed);         // 主车右转
+				make = 0x04;
+			}
+			if (RFID_Flag && (PcdRequest(PICC_REQALL,CT) == MI_OK))		// RFID寻卡
+			{
+				Roadway_Flag_clean();	// 清除标志位状态
+				Send_UpMotor(0,0);		// 停车
+				delay_ms(100);
+				if (Read_RFID(RFID_addr) == 0x02)		// RFID 读卡 -> READ_RFID[16]
+				{
+					RFID_Flag = 0;
+					if((Go_Temp-5) > Roadway_mp_Get())
+					{
+						CarThread_Go(Go_Speed, Go_Temp - Roadway_mp_Get());      // 主车前进
+					}
+					else
+					{
+						CarThread_Track(Go_Speed - RFID_Flag); // 主车循迹
+						make = 0x04;
+					}
+				}
+				else
+				{
+					CarThread_Go(Go_Speed - RFID_Flag, Go_Temp);      // 主车前进
+				}
+			}
+			break;
+			
+		case 0x04:
+//---------------------- 语音播报标志物 ----------------------
+			number = 2;         // 语音识别次数
+            do
+            {
+                SYN7318_Flag = SYN7318_Extern();
+            }
+            while ((!SYN7318_Flag) && (--number));
+//            SYN_Sesult[2] = SYN7318_Flag;
+//            Send_ZigbeeData_To_Fifo(SYN_Sesult, 8);    // 上传语音命令编号
+//            delay_ms(300);
+			
+			Car_Left(wheel_Speed);          // 主车左转
+			CarThread_Track(Go_Speed - RFID_Flag); // 主车循迹
+			make = 0x05;
+			break;
+			
+		case 0x05:
+			if (Stop_Flag == 0x01)
+			{
+				make = 0x06;
+			}
+			if (RFID_Flag && (PcdRequest(PICC_REQALL,CT) == MI_OK))		// RFID寻卡
+			{
+				Roadway_Flag_clean();	// 清除标志位状态
+				Send_UpMotor(0,0);		// 停车
+				delay_ms(100);
+				
+				if (Read_RFID(RFID_addr) == 0x02)		// RFID 读卡 -> READ_RFID[16]
+				{
+					RFID_Flag = 0;
+					CarThread_Track(Go_Speed); // 主车循迹
+				}
+				else
+				{
+					CarThread_Track(Go_Speed - RFID_Flag); // 主车循迹
+				}
+			}
+			break;
+			
+		case 0x06:
+            Car_Go(Go_Speed, Go_Temp+40);   // 主车前进
+			Car_Right(wheel_Speed);         // 主车右转
+			Car_Time_Track(Go_Speed, 400);	// 小车循迹
+			
+//-------------------- 智能TFT显示器 --------------------
+            delay_ms(500);
+//          TFT_Test_Zigbee(0x10,0x01,0x00,0x00);       // TFT显示器图片向上翻页
+            TFT_Test_Zigbee(0x10, 0x02, 0x00, 0x00);    // TFT显示器图片向下翻页
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            TFT_Test_Zigbee(0x10, 0x02, 0x00, 0x00);    // TFT显示器图片向下翻页
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);		// 不少于2s延时
+            TFT_Test_Zigbee(0x40, 0xA3, 0xE2, 0xD2);    // TFT显示器显示图形信息
+			delay_ms(500);
+			/*
+//-------------------- 移动机器人 --------------------
+			AGV_Data_Open();				// AGV开启数据上传
+			AGV_STOP();						// AGV停止
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Left(AGV_wheel_sp);			// AGV左转
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			delay_ms(500);
+			delay_ms(500);
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Left(AGV_wheel_sp);			// AGV左转
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, 200);			// AGV前进
+			AGV_Data_Stop();				// AGV关闭数据上传
+			*/
+			Car_Back(Go_Speed, 150);		// 主车后退
+            Car_Left(wheel_Speed);          // 主车左转
+			Car_Left(wheel_Speed);          // 主车左转
+			
+//-------------------- 道闸系统 --------------------
+//			Send_ZigbeeData_To_Fifo(DZ_K, 8);       // 道闸 -> 开启
+			Gate_Show_Zigbee("A123B4");
+			delay_ms(100);
+			Gate_Show_Zigbee("A123B4");
+			delay_ms(500);
+			delay_ms(500);
+			
+            Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+            Car_Left(wheel_Speed);          // 主车左转
+            Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, 500);          // 主车前进
+
+//------------------- 立体显示 -------------------------
+            Car_R45(90, 600);               // 左旋转 -> 旋转时间
+            delay_ms(500);
+			Rotate_Dis_Inf(SYN7318_Flag*10);	// 向立体显示物发送测距信息
+//            Rotate_show_Inf("A123B4", 'F', '2'); // 向立体显示物发送车牌信息
+            delay_ms(500);
+            Car_R45(90, 600);               // 右旋转 -> 旋转时间
+			
+            Car_Track(Go_Speed);            // 主车循迹
+            Car_Go(Go_Speed, Go_Temp);      // 主车前进
+			Car_Right(wheel_Speed);         // 主车右转
+			Car_Right(wheel_Speed);         // 主车右转
+
+//------------------- 烽火台 ---------------------------
+//            Car_L45(90, 600);               // 左旋转 -> 旋转时间
+//            delay_ms(500);
+//            Infrared_Send(HW_K, 6);         // 烽火台 -> 开启
+//            delay_ms(500);
+//            Car_L45(90, 400);               // 左旋转 -> 旋转时间
+
+            Car_Time_Track(Go_Speed, 700);			// 时间循迹
+            Car_Back(Go_Speed, 1300);				// 后退
+
+            delay_ms(500);
+            Send_ZigbeeData_To_Fifo(WXCD_Open, 8);  // 无线充电 -> 开启
+            delay_ms(500);
+            Send_ZigbeeData_To_Fifo(WXCD_Open, 8);  // 无线充电 -> 开启
+            delay_ms(500);
+
+            delay_ms(100);
+            Send_ZigbeeData_To_Fifo(SMG_JSG, 8);  // 数码管计时 -> 关闭
+            delay_ms(500);
+            Send_ZigbeeData_To_Fifo(SMG_JSG, 8);  // 数码管计时 -> 关闭
+            delay_ms(500);
+
+            Set_tba_Beep(SET);      // 任务板蜂鸣器 -> 开启
+            delay_ms(500);
+            delay_ms(500);
+            delay_ms(500);
+            Set_tba_Beep(RESET);    // 任务板蜂鸣器 -> 关闭
+
+            make = 0;
+        }
+        break;
+
+        case 0xA0:
+        {
+			AGV_Data_Open();				// AGV开启数据上传
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Left(AGV_wheel_sp);			// AGV左转
+			
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Infrared(HW_K);				// AGV开启烽火台
+			AGV_Infrared(HW_K);				// AGV开启烽火台
+			AGV_Reght(AGV_wheel_sp);		// AGV右转
+			
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Reght(AGV_wheel_sp);		// AGV右转
+			
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Reght(AGV_wheel_sp);		// AGV右转
+			
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_GO(AGV_GO_sp, AGV_GO_mp);	// AGV前进
+			AGV_Track(AGV_GO_sp);			// AGV循迹
+			AGV_Data_Stop();				// AGV关闭数据上传
+            make = 0;
+        }
+        break;
+
+        case 0xA1:
+            number = 5;         // 语音识别次数
+            do
+            {
+                SYN7318_Flag = SYN7318_Extern();
+            }
+            while ((!SYN7318_Flag) && (number--));
+            SYN_Sesult[2] = SYN7318_Flag;
+            Send_ZigbeeData_To_Fifo(SYN_Sesult, 8);    // 上传语音命令编号
+            delay_ms(100);
+            Send_ZigbeeData_To_Fifo(SYN_Sesult, 8);    // 上传语音命令编号
+            delay_ms(100);
+            make = 0;
+            break;
+
+        case 0xA2:
+            delay_ms(100);
+            Ultrasonic_Ranging();           // 超声波数据
+            dis_size = dis;
+            LED_Dis_Zigbee(dis_size);       // LED显示标志物发送测距信息
+            delay_ms(100);
+            make = 0;
+            break;
+
+        case 0xA3:
+			Test_Tba(0x01);
+            break;
+		
+		default : 
+			break;
+    }
+}
+
+
+/* 按键检测函数 */
+void KEY_Check(void)
+{
+    if(S1 == 0)
+    {
+        delay_ms(10);
+        if(S1 == 0)
+        {
+            LED1 = !LED1;
+            while(!S1);
+            delay_ms(500);
+            delay_ms(500);
+            make = 0x01;
+        }
+    }
+    if(S2 == 0)
+    {
+        delay_ms(10);
+        if(S2 == 0)
+        {
+            LED2 = !LED2;
+            while(!S2);
+            make = 0xA0;
+        }
+    }
+    if(S3 == 0)
+    {
+        delay_ms(10);
+        if(S3 == 0)
+        {
+            LED3 = !LED3;
+            while(!S3);
+            make = 0xA1;
+        }
+    }
+    if(S4 == 0)
+    {
+        delay_ms(10);
+        if(S4 == 0)
+        {
+            make = 0xA2;
+//            RC522(4, RFID_Write_Read);  // RFID控制 -> 写卡
+        }
+    }
+}
+
+int main(void)
+{
+    uint16_t Light_Value = 0;               // 光强度值
+    uint16_t CodedDisk_Value = 0;           // 码盘值
+    uint16_t Nav_Value = 0;                 // 角度值
+
+    Hardware_Init();                        // 硬件初始化
+
+    LED_twinkle_times = gt_get() + 50;
+    Power_check_times = gt_get() + 200;
+    WIFI_Upload_data_times = gt_get() + 200;
+    RFID_Init_Check_times = gt_get() + 200;
+
+    Principal_Tab[0] = 0x55;                // 主车数据上传指令包头
+    Principal_Tab[1] = 0xAA;
+
+    Follower_Tab[0] = 0x55;                 // 智能运输车数据上传指令包头
+    Follower_Tab[1] = 0x02;
+	
+	Send_InfoData_To_Fifo("WEN\n", 5);
+	
+    Send_UpMotor(0, 0);
+    while(1)
+    {
+        Car_Thread();                                   // 全自动控制
+        KEY_Check();                                    // 按键检测
+        Can_WifiRx_Check();                             // Wifi交互数据处理
+        Can_ZigBeeRx_Check();                           // Zigbee交互数据处理
+
+        if(gt_get_sub(LED_twinkle_times) == 0)          // 运行指示灯
+        {
+            LED_twinkle_times = gt_get() + 50;          // LED4状态取反
+            LED4 = !LED4;
+        }
+
+        if(gt_get_sub(Power_check_times) == 0)          // 电池电量检测
+        {
+            Power_check_times = gt_get() + 200;
+            Power_Check();
+        }
+
+#if 1
+        if(gt_get_sub(RFID_Init_Check_times) == 0)      // RFID初始化检测
+        {
+            RFID_Init_Check_times =  gt_get() + 200;
+            if(Rc522_GetLinkFlag() == 0)
+            {
+                Readcard_daivce_Init();
+                MP_SPK = !MP_SPK;
+            }
+            else
+            {
+//              MP_SPK = 0;
+//              LED1 = !LED1;
+                Rc522_LinkTest();
+            }
+        }
+#endif
+        if(gt_get_sub(WIFI_Upload_data_times) == 0)         // 数据上传
+        {
+            WIFI_Upload_data_times =  gt_get() + 500;
+            if(Host_AGV_Return_Flag == RESET)               // 主车数据上传
+            {
+                Principal_Tab[2] = Stop_Flag;               // 运行状态
+                Principal_Tab[3] = Get_tba_phsis_value();   // 光敏状态
+
+                Ultrasonic_Ranging();                       // 超声波数据采集
+                Principal_Tab[4] = dis % 256;               // 超声波数据低八位
+                Principal_Tab[5] = dis / 256;               // 超声波数据高八位
+
+                Light_Value = Get_Bh_Value();               // 光强度传感器数据采集
+                Principal_Tab[6] = Light_Value % 256;       // 光强度数据低八位
+                Principal_Tab[7] = Light_Value / 256;       // 光强度数据高八位
+
+                CodedDisk_Value = CanHost_Mp;               // 码盘值
+                Principal_Tab[8] = CodedDisk_Value % 256;
+                Principal_Tab[9] = CodedDisk_Value / 256;
+
+                Nav_Value = CanHost_Navig;                  // 角度值
+                Principal_Tab[10] = Nav_Value % 256;
+                Principal_Tab[11] = Nav_Value / 256;
+
+                Send_WifiData_To_Fifo(Principal_Tab, 12);   // 通过Wifi上传主车数据
+                UartA72_TxClear();
+                UartA72_TxAddStr(Principal_Tab, 12);        // 通过串口上传主车数据
+                UartA72_TxStart();
+            }
+            else if((Host_AGV_Return_Flag == SET) && (AGV_data_Falg == SET))
+            {
+
+                UartA72_TxClear();
+                UartA72_TxAddStr(Follower_Tab, 50);         // 通过串口上传主车数据
+                UartA72_TxStart();
+                Send_WifiData_To_Fifo(Follower_Tab, 50);    // 通过Wifi上传主车数据
+                AGV_data_Falg = 0;
+            }
+        }
+    }
+}
+
+/* 硬件初始化函数 */
+void Hardware_Init(void)
+{
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_0);     // 中断分组
+    delay_init(168);                                    // 延时初始化
+    Tba_Init();                                         // 任务板初始化
+    Infrared_Init();                                    // 红外初始化
+    Cba_Init();                                         // 核心板初始化
+    Ultrasonic_Init();                                  // 超声波初始化
+    Hard_Can_Init();                                    // CAN总线初始化
+    BH1750_Configure();                                 // BH1750初始化配置
+    SYN7318_Init();                                     // 语音识别初始化
+    Electricity_Init();                                 // 电量检测初始化
+    UartA72_Init();                                     // A72硬件串口通讯初始化
+    Can_check_Init(7, 83);                              // CAN总线定时器初始化
+    roadway_check_TimInit(1999, 167);                   // 路况检测
+    Timer_Init(999, 167);                               // 串行数据通讯时间帧
+    Readcard_daivce_Init();                         // RFID初始化
+}
+
